@@ -1,0 +1,36 @@
+name: Translate Group Messages to Thai
+
+on:
+  schedule:
+    - cron: "*/5 10 * * *"
+  workflow_dispatch: {}
+
+permissions:
+  contents: write
+
+jobs:
+  translate:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Run translator
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TRANSLATOR_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_GROUP_CHAT_ID }}
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+        run: python translate_bot.py
+
+      - name: Commit updated state
+        run: |
+          git config user.name "translator-bot"
+          git config user.email "actions@github.com"
+          git add state.json
+          git diff --staged --quiet || git commit -m "chore: update state.json [skip ci]"
+          git push

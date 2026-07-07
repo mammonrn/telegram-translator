@@ -111,7 +111,7 @@ def translate_to_thai(text):
         "x-api-key": ANTHROPIC_API_KEY,
         "anthropic-version": "2023-06-01",
     }
-    result = http_post_json(ANTHROPIC_API, payload, headers=headers)
+    result = http_post_json(ANTHROPIC_API, payload, headers=headers, timeout=90)
     parts = [b["text"] for b in result.get("content", []) if b.get("type") == "text"]
     return "".join(parts).strip()
 

@@ -75,14 +75,19 @@ def get_updates(offset):
 
 
 def send_message(chat_id, text, reply_to_message_id=None):
-    payload = {
-        "chat_id": chat_id,
-        "text": text,
-    }
-    if reply_to_message_id:
-        payload["reply_to_message_id"] = reply_to_message_id
-    return http_post_json(f"{TELEGRAM_API}/sendMessage", payload)
-
+    max_len = 4000
+    chunks = [text[i:i+max_len] for i in range(0, len(text), max_len)] or [""]
+    results = []
+    for i, chunk in enumerate(chunks):
+        payload = {
+            "chat_id": chat_id,
+            "text": chunk,
+        }
+        if i == 0 and reply_to_message_id:
+            payload["reply_to_message_id"] = reply_to_message_id
+        results.append(http_post_json(f"{TELEGRAM_API}/sendMessage", payload))
+        time.sleep(1)
+    return results
 
 def looks_like_thai_only(text):
     """เดาแบบง่ายๆ ว่าข้อความนี้เป็นภาษาไทยอยู่แล้วหรือเปล่า (เพื่อข้าม ไม่แปลซ้ำ)"""

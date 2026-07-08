@@ -125,6 +125,8 @@ def restore_urls(text, urls):
     return text
 
 
+import unicodedata
+
 # วลีที่บ่งบอกว่า Claude ปฏิเสธ/ไม่ยอมแปล (ใช้เช็คเพื่อ fallback)
 REFUSAL_MARKERS = [
     "ไม่สามารถแปล",
@@ -137,9 +139,25 @@ REFUSAL_MARKERS = [
 ]
 
 
+def normalize(text):
+    """ปรับ Unicode ให้เป็นรูปแบบเดียวกัน ป้องกันการเทียบ string พลาดเพราะสระ/วรรณยุกต์ไทยเข้ารหัสต่างกัน"""
+    return unicodedata.normalize("NFC", text)
+
+
 def looks_like_refusal(text):
-    lowered = text.lower()
-    return any(marker.lower() in lowered for marker in REFUSAL_MARKERS)
+    lowered = normalize(text).lower()
+    return any(normalize(marker).lower() in lowered for marker in REFUSAL_MARKERS)
+
+
+def placeholders_missing(protected_text, translated_text, urls):
+    """เช็คว่า placeholder __URL_x__ ที่ควรมีอยู่ หายไปจากคำแปลหรือเปล่า
+    (หลักฐานที่แน่นอนกว่าการเช็คคำพูด เพราะไม่ขึ้นกับภาษาหรือการเข้ารหัส Unicode)"""
+    if not urls:
+        return False
+    for key in urls:
+        if key not in translated_text:
+            return True
+    return False
 
 
 def translate_to_thai(text):
@@ -147,13 +165,15 @@ def translate_to_thai(text):
     protected_text, urls = protect_urls(text)
     translated = _call_claude_translate(protected_text)
 
-    # ถ้า Claude ปฏิเสธ ลองอีกครั้งด้วย prompt ที่ตรงไปตรงมากว่าเดิม
-    if looks_like_refusal(translated):
-        print(f"ตรวจพบการปฏิเสธ ลองแปลใหม่อีกครั้ง: {text[:40]}...")
-        translated = _call_claude_translate(protected_text, retry=True)
+    failed = looks_like_refusal(translated) or placeholders_missing(protected_text, translated, urls)
 
-    # ถ้ายังปฏิเสธอีก ให้ส่งข้อความต้นฉบับกลับไปแทน (ดีกว่าโชว์คำปฏิเสธให้ผู้ใช้เห็น)
-    if looks_like_refusal(translated) or not translated:
+    if failed:
+        print(f"ตรวจพบปัญหา (ปฏิเสธ/placeholder หาย) ลองแปลใหม่อีกครั้ง: {text[:40]}...")
+        translated = _call_claude_translate(protected_text, retry=True)
+        failed = looks_like_refusal(translated) or placeholders_missing(protected_text, translated, urls)
+
+    # ถ้ายังล้มเหลวอีก ให้ส่งข้อความต้นฉบับกลับไปแทน (ดีกว่าโชว์คำปฏิเสธ หรือคำแปลที่ทำลิงก์หายให้ผู้ใช้เห็น)
+    if failed or not translated:
         print(f"แปลไม่สำเร็จแม้ลองใหม่ ส่งข้อความต้นฉบับแทน: {text[:40]}...")
         return text
 

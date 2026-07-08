@@ -4,14 +4,17 @@ Telegram Group Translator Bot
 ดึงข้อความใหม่ในกลุ่ม Telegram (จีน/อังกฤษ/พม่า) แล้วแปลเป็นไทยด้วย Claude API
 จากนั้นส่งคำแปลกลับเข้ากลุ่มเดิม
 
-ออกแบบมาให้รันแบบ "ครั้งเดียวจบ" (one-shot) เหมาะกับ GitHub Actions
-ที่ตั้งเวลารันเป็นช่วงๆ (cron) ไม่ใช่โปรแกรมที่รันค้างตลอดเวลา
+ระบบป้องกันลิงก์: URL (เช่น TikTok, YouTube, Facebook) จะถูกดึงออกมาเก็บไว้
+ก่อนส่งให้ Claude แปล แล้วใส่กลับเข้าไปทีหลัง เพื่อไม่ให้ลิงก์ถูกแปล/แก้ไข
+
+รันแบบ one-shot เหมาะกับ GitHub Actions ที่ตั้งเวลารันเป็นช่วงๆ (cron)
 
 State (last_update_id) จะถูกเก็บไว้ในไฟล์ state.json แล้ว commit กลับเข้า repo
 เพื่อให้รอบถัดไปรู้ว่าอ่านข้อความไปถึงไหนแล้ว (ไม่แปลซ้ำ)
 """
 
 import os
+import re
 import json
 import sys
 import time
@@ -28,11 +31,14 @@ TELEGRAM_API = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}"
 ANTHROPIC_API = "https://api.anthropic.com/v1/messages"
 ANTHROPIC_MODEL = os.environ.get("ANTHROPIC_MODEL", "claude-sonnet-4-6")
 
+# จับ URL ทุกรูปแบบ (http/https และ www.)
+URL_PATTERN = re.compile(r'(https?://[^\s]+|www\.[^\s]+)')
+
 # ป้องกันลูป: ต้องรู้ id ของบอทแปลตัวเอง เพื่อไม่แปลข้อความที่ตัวเองส่ง
 ME = None
 
 
-def http_post_json(url, payload, headers=None, timeout=30):
+def http_post_json(url, payload, headers=None, timeout=90):
     data = json.dumps(payload).encode("utf-8")
     req = urllib.request.Request(url, data=data, method="POST")
     req.add_header("Content-Type", "application/json")
@@ -76,18 +82,14 @@ def get_updates(offset):
 
 def send_message(chat_id, text, reply_to_message_id=None):
     max_len = 4000
-    chunks = [text[i:i+max_len] for i in range(0, len(text), max_len)] or [""]
-    results = []
+    chunks = [text[i:i + max_len] for i in range(0, len(text), max_len)] or [""]
     for i, chunk in enumerate(chunks):
-        payload = {
-            "chat_id": chat_id,
-            "text": chunk,
-        }
+        payload = {"chat_id": chat_id, "text": chunk}
         if i == 0 and reply_to_message_id:
             payload["reply_to_message_id"] = reply_to_message_id
-        results.append(http_post_json(f"{TELEGRAM_API}/sendMessage", payload))
-        time.sleep(1)
-    return results
+        http_post_json(f"{TELEGRAM_API}/sendMessage", payload)
+        time.sleep(1)  # กันโดน rate limit ของ Telegram
+
 
 def looks_like_thai_only(text):
     """เดาแบบง่ายๆ ว่าข้อความนี้เป็นภาษาไทยอยู่แล้วหรือเปล่า (เพื่อข้าม ไม่แปลซ้ำ)"""
@@ -98,19 +100,50 @@ def looks_like_thai_only(text):
     return thai_chars / letters > 0.5
 
 
+def protect_urls(text):
+    """
+    แทนที่ URL (TikTok, YouTube, Facebook ฯลฯ) ด้วย placeholder ชั่วคราว
+    ก่อนส่งให้ Claude แปล เพื่อไม่ให้ Claude แปล/แก้ไขตัวลิงก์เอง
+    คืนค่า (ข้อความที่แทน URL แล้ว, dict ของ placeholder -> URL จริง)
+    """
+    urls = {}
+
+    def replace(match):
+        url = match.group(0)
+        key = f"__URL_{len(urls)}__"
+        urls[key] = url
+        return key
+
+    protected_text = URL_PATTERN.sub(replace, text)
+    return protected_text, urls
+
+
+def restore_urls(text, urls):
+    """ใส่ URL จริงกลับเข้าไปแทนที่ placeholder หลังแปลเสร็จ"""
+    for key, url in urls.items():
+        text = text.replace(key, url)
+    return text
+
+
 def translate_to_thai(text):
-    """เรียก Claude API แปลข้อความ (จีน/อังกฤษ/พม่า) เป็นไทย"""
+    """เรียก Claude API แปลข้อความ (จีน/อังกฤษ/พม่า) เป็นไทย โดยไม่แตะ URL"""
+    protected_text, urls = protect_urls(text)
+
     system_prompt = (
         "คุณเป็นนักแปลมืออาชีพ หน้าที่ของคุณคือแปลข้อความที่ได้รับ "
         "(อาจเป็นภาษาจีน อังกฤษ หรือพม่า) ให้เป็นภาษาไทยที่อ่านลื่นและเป็นธรรมชาติ "
-        "รักษาความหมาย ตัวเลข และรูปแบบตาราง/บรรทัดเดิมไว้ให้มากที่สุด "
+        "รักษาความหมาย ตัวเลข และรูปแบบตาราง/บรรทัดเดิมไว้ให้มากที่สุด\n\n"
+        "ในข้อความอาจมีคำแบบ __URL_0__ __URL_1__ __URL_2__ (เป็นต้น) ปนอยู่ "
+        "คำเหล่านี้คือลิงก์ที่ถูกซ่อนไว้ชั่วคราว "
+        "ให้คงคำเหล่านี้ไว้เหมือนเดิมทุกตัวอักษร วางไว้ตำแหน่งเดิมในประโยค "
+        "ห้ามแปล ห้ามแก้ไข ห้ามลบ ห้ามเพิ่มช่องว่างหรือสัญลักษณ์ใดๆ รอบคำเหล่านี้เด็ดขาด\n\n"
         "ตอบกลับเฉพาะคำแปลภาษาไทยเท่านั้น ห้ามใส่คำอธิบายเพิ่มเติมหรือคำนำ"
     )
     payload = {
         "model": ANTHROPIC_MODEL,
         "max_tokens": 4000,
         "system": system_prompt,
-        "messages": [{"role": "user", "content": text}],
+        "messages": [{"role": "user", "content": protected_text}],
     }
     headers = {
         "x-api-key": ANTHROPIC_API_KEY,
@@ -118,7 +151,9 @@ def translate_to_thai(text):
     }
     result = http_post_json(ANTHROPIC_API, payload, headers=headers, timeout=90)
     parts = [b["text"] for b in result.get("content", []) if b.get("type") == "text"]
-    return "".join(parts).strip()
+    translated = "".join(parts).strip()
+
+    return restore_urls(translated, urls)
 
 
 def main():

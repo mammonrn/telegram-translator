@@ -1,0 +1,10 @@
+.env
+service_account.json
+*.json.key
+venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+.drive_folder_cache.json
+expense_bot.log
+*.log

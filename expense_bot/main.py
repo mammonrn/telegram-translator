@@ -30,6 +30,7 @@ from handlers.commands import (
     EDIT_WAIT_FIELD,
     EDIT_WAIT_REF,
     EDIT_WAIT_VALUE,
+    EXPENSE_QUERY_REGEX,
     CommandHandlers,
 )
 from ocr import OCREngine
@@ -100,6 +101,18 @@ def build_application(config: Config) -> Application:
         name="delete_conversation",
     )
 
+    # Logs a cash expense with no slip: /cash, /cash <amount> [remark], or
+    # simply typing a bare amount (e.g. "150") directly to the bot.
+    cash_conversation = ConversationHandler(
+        entry_points=[
+            CommandHandler("cash", slip_flow.handle_cash_command),
+            MessageHandler(slip_flow.cash_entry_filters(), slip_flow.handle_cash_amount_entry),
+        ],
+        states=slip_flow.build_cash_states(),
+        fallbacks=[CommandHandler("cancel", slip_flow.cancel)],
+        name="cash_conversation",
+    )
+
     application.add_handler(CommandHandler("start", commands.start))
     application.add_handler(CommandHandler("help", commands.help_cmd))
     application.add_handler(CommandHandler("stats_month", commands.stats_month))
@@ -108,9 +121,17 @@ def build_application(config: Config) -> Application:
     application.add_handler(CommandHandler("export_excel", commands.export_excel))
     application.add_handler(CommandHandler("search_category", commands.search_category))
     application.add_handler(CommandHandler("search_date", commands.search_date))
+    # Conversations that consume free-text replies must be registered before
+    # cash_conversation's broad "any bare number" entry point, so an active
+    # edit/delete/slip conversation always gets first refusal on a user's
+    # text reply instead of it being misread as a new cash entry.
     application.add_handler(edit_conversation)
     application.add_handler(delete_conversation)
     application.add_handler(slip_conversation)
+    application.add_handler(cash_conversation)
+    # Free-text "how much have I spent" trigger - registered last so it
+    # never intercepts a reply that belongs to an in-progress conversation.
+    application.add_handler(MessageHandler(filters.Regex(EXPENSE_QUERY_REGEX), commands.stats_month))
     application.add_error_handler(on_error)
 
     if application.job_queue is not None:

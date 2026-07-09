@@ -1,6 +1,8 @@
 """The core Telegram conversation: slip photo/PDF -> OCR -> category -> remark -> save.
 
-Flow:
+Two entry points feed the same category/remark/save pipeline:
+
+Slip flow:
     1. User sends a photo or PDF document of a transfer slip.
     2. Bot downloads + compresses it, uploads the original to Drive, runs OCR.
     3. If OCR isn't confident about the amount, ask the user to type it.
@@ -9,11 +11,17 @@ Flow:
     5. Show extracted info and ask for a category via inline keyboard.
     6. Ask for an optional remark.
     7. Save to Google Sheets and confirm.
+
+Cash flow (no slip):
+    1. User runs /cash (optionally with an amount, e.g. "/cash 150 coffee"),
+       or simply types a bare amount (e.g. "150") directly to the bot.
+    2. Bot skips OCR/Drive/duplicate-check and goes straight to step 5 above.
 """
 
 from __future__ import annotations
 
 import logging
+import re
 from dataclasses import dataclass
 from datetime import date as date_cls, datetime, time as time_cls
 from decimal import Decimal, InvalidOperation
@@ -26,6 +34,7 @@ from telegram import (
 )
 from telegram.ext import (
     CallbackQueryHandler,
+    CommandHandler,
     ContextTypes,
     ConversationHandler,
     MessageHandler,
@@ -40,8 +49,12 @@ from utils import MONTH_NAMES, compress_image, parse_amount
 
 logger = logging.getLogger("expense_bot.conversation")
 
-# Conversation states
+# Conversation states (slip flow)
 WAITING_AMOUNT_CORRECTION, WAITING_DUPLICATE_CONFIRM, WAITING_CATEGORY, WAITING_REMARK_CHOICE, WAITING_REMARK_TEXT = range(5)
+
+# Conversation states (cash flow) - a separate ConversationHandler instance,
+# so reusing the shared WAITING_CATEGORY/WAITING_REMARK_* values below is safe.
+CASH_WAITING_AMOUNT = 100
 
 CB_CATEGORY_PREFIX = "cat:"
 CB_REMARK_SKIP = "remark:skip"
@@ -51,10 +64,17 @@ CB_DUP_NO = "dup:no"
 
 PENDING_KEY = "pending_expense"
 
+# Matches a bare cash amount typed directly to the bot, e.g. "150",
+# "150.50", "1,200", "150 บาท", "฿150". Used as a conversation entry point
+# for logging a cash expense without a slip.
+CASH_AMOUNT_REGEX = re.compile(
+    r"^\s*฿?\s*\d{1,3}(?:,\d{3})*(?:\.\d{1,2})?\s*(?:บาท|บ\.|thb|baht)?\s*$", re.IGNORECASE
+)
+
 
 @dataclass
 class PendingExpense:
-    """State accumulated across the conversation for a single slip."""
+    """State accumulated across the conversation for a single slip or cash entry."""
 
     amount: Optional[Decimal]
     bank: str
@@ -68,6 +88,7 @@ class PendingExpense:
     ocr_confidence: float
     category: Optional[str] = None
     remark: str = ""
+    remark_prefilled: bool = False
 
 
 class SlipConversation:
@@ -310,6 +331,9 @@ class SlipConversation:
         emoji, label = CATEGORIES.get(category_key, ("📦", "Other"))
         pending.category = label
 
+        if pending.remark_prefilled:
+            return await self._finalize(update, context, remark=pending.remark, message=query.message, edit=True)
+
         keyboard = InlineKeyboardMarkup(
             [[InlineKeyboardButton("Skip", callback_data=CB_REMARK_SKIP),
               InlineKeyboardButton("Type Remark", callback_data=CB_REMARK_TYPE)]]
@@ -390,10 +414,81 @@ class SlipConversation:
         await update.effective_message.reply_text("Cancelled.")
         return ConversationHandler.END
 
+    # -- cash expense entry (no slip) -----------------------------------------
+    #
+    # Reuses the same PendingExpense / category / remark / save pipeline as
+    # the slip flow, just skipping OCR, Drive upload, and duplicate checking
+    # (a cash entry has no reference number to dedup against).
+
+    async def handle_cash_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+        user = update.effective_user
+        message = update.effective_message
+        if not self.is_authorized(user.id):
+            await message.reply_text("You're not authorized to use this bot.")
+            return ConversationHandler.END
+
+        if context.args:
+            amount = parse_amount(context.args[0])
+            if amount is not None:
+                remark = " ".join(context.args[1:]).strip()
+                return await self._start_cash_pending(update, context, amount, remark)
+            await message.reply_text(
+                "ไม่พบจำนวนเงินที่ถูกต้อง กรุณาลองใหม่ เช่น /cash 150 ค่ากาแฟ"
+            )
+
+        await message.reply_text("💵 กรุณาพิมพ์จำนวนเงินสดที่จ่าย (เช่น 150 หรือ 150.50)")
+        return CASH_WAITING_AMOUNT
+
+    async def handle_cash_amount_entry(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+        """Entry point: user typed a bare amount directly, with no /cash command."""
+        user = update.effective_user
+        message = update.effective_message
+        if not self.is_authorized(user.id):
+            return ConversationHandler.END
+
+        amount = parse_amount(message.text or "")
+        if amount is None:
+            return ConversationHandler.END
+        return await self._start_cash_pending(update, context, amount, remark="")
+
+    async def handle_cash_amount_text(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+        """Amount reply after a bare `/cash` prompt."""
+        message = update.effective_message
+        amount = parse_amount(message.text or "")
+        if amount is None:
+            await message.reply_text("จำนวนเงินไม่ถูกต้อง กรุณาลองใหม่ เช่น 150 หรือ 150.50")
+            return CASH_WAITING_AMOUNT
+        return await self._start_cash_pending(update, context, amount, remark="")
+
+    async def _start_cash_pending(
+        self, update: Update, context: ContextTypes.DEFAULT_TYPE, amount: Decimal, remark: str
+    ) -> int:
+        now = datetime.now()
+        user = update.effective_user
+        pending = PendingExpense(
+            amount=amount,
+            bank="Cash (No Slip)",
+            slip_date=now.date(),
+            slip_time=now.time().replace(microsecond=0),
+            sender=user.full_name or "",
+            receiver="",
+            reference_number="",
+            drive_url="",
+            telegram_file_id="",
+            ocr_confidence=1.0,  # manually entered, fully trusted
+            remark=remark,
+            remark_prefilled=bool(remark),
+        )
+        context.user_data[PENDING_KEY] = pending
+        return await self._ask_category(update.effective_message, pending)
+
     # -- handler registration ------------------------------------------------
 
     def entry_filters(self) -> filters.BaseFilter:
         return filters.PHOTO | filters.Document.IMAGE | filters.Document.PDF
+
+    def cash_entry_filters(self) -> filters.BaseFilter:
+        return filters.Regex(CASH_AMOUNT_REGEX)
 
     def build_states(self) -> dict[int, list]:
         return {
@@ -402,6 +497,22 @@ class SlipConversation:
             ],
             WAITING_DUPLICATE_CONFIRM: [
                 CallbackQueryHandler(self.handle_duplicate_confirm, pattern=r"^dup:")
+            ],
+            WAITING_CATEGORY: [
+                CallbackQueryHandler(self.handle_category, pattern=f"^{CB_CATEGORY_PREFIX}")
+            ],
+            WAITING_REMARK_CHOICE: [
+                CallbackQueryHandler(self.handle_remark_choice, pattern=r"^remark:")
+            ],
+            WAITING_REMARK_TEXT: [
+                MessageHandler(filters.TEXT & ~filters.COMMAND, self.handle_remark_text)
+            ],
+        }
+
+    def build_cash_states(self) -> dict[int, list]:
+        return {
+            CASH_WAITING_AMOUNT: [
+                MessageHandler(filters.TEXT & ~filters.COMMAND, self.handle_cash_amount_text)
             ],
             WAITING_CATEGORY: [
                 CallbackQueryHandler(self.handle_category, pattern=f"^{CB_CATEGORY_PREFIX}")

@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import io
 import logging
+import re
 from datetime import date, datetime
 from decimal import Decimal
 
@@ -25,6 +26,14 @@ EDIT_WAIT_REF, EDIT_WAIT_FIELD, EDIT_WAIT_VALUE = range(3)
 DELETE_WAIT_REF, DELETE_WAIT_CONFIRM = range(3, 5)
 
 EDITABLE_FIELDS = ["Amount", "Category", "Remark", "Bank", "Sender", "Receiver"]
+
+# Matches free-text messages asking for an expense summary, so users can
+# just type it directly to the bot instead of remembering /stats_month.
+EXPENSE_QUERY_REGEX = re.compile(
+    r"(สรุปค่าใช้จ่าย|ค่าใช้จ่ายเดือนนี้|ยอดใช้จ่าย|รายจ่ายเดือนนี้|ใช้เงินไปเท่าไหร่|"
+    r"ใช้จ่ายไปเท่าไหร่|เดือนนี้ใช้ไป|expense\s*summary|spending\s*this\s*month|how\s*much.*spent)",
+    re.IGNORECASE,
+)
 
 
 class CommandHandlers:
@@ -51,6 +60,8 @@ class CommandHandlers:
             return
         await update.effective_message.reply_text(
             "👋 Send me a photo or PDF of a bank transfer slip and I'll record it as an expense.\n\n"
+            "Paid with cash instead? Just type the amount (e.g. \"150\") or use /cash.\n"
+            "Want to know how much you've spent this month? Just ask, e.g. \"สรุปค่าใช้จ่าย\".\n\n"
             "Type /help to see everything I can do."
         )
 
@@ -59,10 +70,15 @@ class CommandHandlers:
             return
         text = (
             "*Expense Tracker Bot*\n\n"
-            "📷 Send a slip photo/PDF to record an expense.\n\n"
+            "📷 Send a slip photo/PDF to record an expense.\n"
+            "💵 No slip? Type a bare amount (e.g. \"150\") or use /cash `<amount>` `[remark]` "
+            "to log a cash expense directly.\n"
+            "🗣 Ask directly, e.g. \"สรุปค่าใช้จ่าย\" / \"ค่าใช้จ่ายเดือนนี้เท่าไหร่\", "
+            "and I'll reply with this month's totals and category breakdown.\n\n"
             "*Commands*\n"
-            "/stats\\_month - this month's totals by category\n"
-            "/stats\\_year - this year's totals by category\n"
+            "/cash `[amount]` `[remark]` - log a cash expense (no slip)\n"
+            "/stats\\_month - this month's totals by category, with %\n"
+            "/stats\\_year - this year's totals by category, with %\n"
             "/export\\_csv - export your records as CSV\n"
             "/export\\_excel - export your records as Excel\n"
             "/search\\_category `<category>` - list expenses in a category\n"
@@ -237,14 +253,16 @@ class CommandHandlers:
 
 
 def _format_totals(period_label: str, totals: dict[str, Decimal]) -> str:
+    """Render a total + per-category breakdown with each category's share (%)."""
     if not totals:
-        return f"No expenses recorded for {period_label}."
-    lines = [f"📊 Expenses for {period_label}"]
-    grand_total = Decimal("0")
+        return f"ไม่มีรายการค่าใช้จ่ายในช่วง {period_label}"
+    grand_total: Decimal = sum(totals.values())
+    lines = [f"📊 สรุปค่าใช้จ่าย - {period_label}", ""]
     for category, amount in sorted(totals.items(), key=lambda kv: kv[1], reverse=True):
-        lines.append(f"  {category}: {amount:.2f}")
-        grand_total += amount
-    lines.append(f"\nTotal: {grand_total:.2f}")
+        pct = (amount / grand_total * 100) if grand_total else Decimal("0")
+        lines.append(f"  • {category}: {amount:,.2f} บาท ({pct:.1f}%)")
+    lines.append("")
+    lines.append(f"รวมทั้งหมด: {grand_total:,.2f} บาท")
     return "\n".join(lines)
 
 

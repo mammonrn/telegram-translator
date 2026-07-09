@@ -19,9 +19,17 @@ Send a photo (or PDF) of a bank transfer slip to a Telegram bot and have it:
   yes/no confirmation before saving a repeat.
 - OCR confidence scoring; low-confidence amounts trigger a manual re-entry
   prompt instead of saving bad data.
+- **Cash expenses (no slip)**: type a bare amount directly to the bot (e.g.
+  "150" or "150 บาท"), or use `/cash [amount] [remark]`, to log a cash
+  payment straight to the same category/remark flow — no OCR, no Drive
+  upload, no duplicate check.
+- **Ask for a summary directly**: type a phrase like "สรุปค่าใช้จ่าย" or
+  "ค่าใช้จ่ายเดือนนี้เท่าไหร่" (or in English, "expense summary") and the bot
+  replies with this month's total plus each category's amount and % share —
+  no command needed, same output as `/stats_month`.
 - Google Drive folder-ID caching to minimize API calls.
 - Multi-user support, scoped by Telegram user ID (`ALLOWED_USER_IDS`).
-- `/stats_month`, `/stats_year`, `/export_csv`, `/export_excel`,
+- `/cash`, `/stats_month`, `/stats_year`, `/export_csv`, `/export_excel`,
   `/search_category`, `/search_date`, `/edit`, `/delete`.
 - Daily automatic Google Sheet backup (Drive file copy), plus automatic
   monthly (1st of month) and yearly (Jan 1st) reports sent to each user.
@@ -151,6 +159,24 @@ User sends slip photo/PDF
   -> bot shows extracted info + category buttons
   -> bot asks "Add a remark?" (Skip / Type Remark)
   -> bot saves to Google Sheets and replies "✅ Expense Recorded Successfully"
+```
+
+Cash expense (no slip) — skips OCR, Drive upload, and duplicate check:
+
+```
+User types "150" (or "/cash 150 coffee") directly to the bot
+  -> bot shows category buttons
+  -> bot asks "Add a remark?" (Skip / Type Remark), unless a remark was
+     already given as part of "/cash <amount> <remark>"
+  -> bot saves to Google Sheets and replies "✅ Expense Recorded Successfully"
+```
+
+Instant expense summary — no command needed:
+
+```
+User types "สรุปค่าใช้จ่าย" / "ค่าใช้จ่ายเดือนนี้เท่าไหร่" / "expense summary"
+  -> bot replies with this month's total plus each category's
+     amount and % share of the total (same as /stats_month)
 ```
 
 ## Categories
